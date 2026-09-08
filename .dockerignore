@@ -1,0 +1,12 @@
+**/__pycache__/
+**/*.py[cod]
+**/venv/
+**/.venv/
+bracell/outputs/*
+!bracell/outputs/.gitkeep
+bracell/logs/*
+!bracell/logs/.gitkeep
+tests/
+relatorios_validacao/
+.git/
+.env

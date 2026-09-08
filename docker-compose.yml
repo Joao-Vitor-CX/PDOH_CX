@@ -1,0 +1,97 @@
+name: pdoh_cx
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: pdoh_cx_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-pdoh_cx_root_dev}
+      TZ: America/Sao_Paulo
+    ports:
+      - "${PDOH_MYSQL_PORT:-3307}:3306"
+    volumes:
+      - pdoh_cx_mysql_data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - pdoh_cx_network
+
+  migrate:
+    image: mysql:8.4
+    environment:
+      MYSQL_PWD: ${MYSQL_ROOT_PASSWORD:-pdoh_cx_root_dev}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      [
+        "sh",
+        "-ec",
+        "for migration in /migrations/*.sql; do mysql -h mysql -uroot --default-character-set=utf8mb4 < \"$$migration\"; done",
+      ]
+    volumes:
+      - ./docker/mysql/migrations:/migrations:ro
+    networks:
+      - pdoh_cx_network
+
+  backend:
+    image: pdoh_cx:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdoh_cx_backend
+    environment:
+      PDOH_DB_HOST: mysql
+      PDOH_DB_PORT: "3306"
+      PDOH_DB_USER: pdoh_cx_app
+      PDOH_DB_PASSWORD: pdoh_cx_dev
+      TZ: America/Sao_Paulo
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "src.healthcheck", "--wait"]
+    volumes:
+      - ./bracell/outputs:/app/outputs
+      - ./bracell/logs:/app/logs
+    networks:
+      - pdoh_cx_network
+
+  pipeline:
+    profiles: ["pipeline"]
+    image: pdoh_cx:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PDOH_DB_HOST: mysql
+      PDOH_DB_PORT: "3306"
+      PDOH_DB_USER: pdoh_cx_app
+      PDOH_DB_PASSWORD: pdoh_cx_dev
+      TZ: America/Sao_Paulo
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["python", "run_observado.py"]
+    volumes:
+      - ./bracell/outputs:/app/outputs
+      - ./bracell/logs:/app/logs
+    networks:
+      - pdoh_cx_network
+
+volumes:
+  pdoh_cx_mysql_data:
+    name: pdoh_cx_mysql_data
+
+networks:
+  pdoh_cx_network:
+    name: pdoh_cx_network
