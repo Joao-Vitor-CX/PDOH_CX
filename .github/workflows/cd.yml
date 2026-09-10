@@ -35,7 +35,7 @@ jobs:
       PDOH_MYSQL_PORT: ${{ vars.PDOH_MYSQL_PORT }}
     steps:
       - name: Validar repositorio de destino
-        shell: pwsh
+        shell: powershell
         run: |
           if ([string]::IsNullOrWhiteSpace($env:PDOH_CX_ALLOWED_REPOSITORY)) {
             throw "Defina a variavel PDOH_CX_GITHUB_REPOSITORY no ambiente pdoh-cx-local."
@@ -56,7 +56,7 @@ jobs:
 
       - name: Identificar revisao
         id: revision
-        shell: pwsh
+        shell: powershell
         run: "Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value \"sha=$(git rev-parse HEAD)\""
 
       - name: Exigir PR com CI aprovado
@@ -90,13 +90,13 @@ jobs:
             }
 
       - name: Validar arquivos e configuracao
-        shell: pwsh
+        shell: powershell
         run: |
           python scripts/validate_cicd.py --check-remote --output artifacts/cd-static.json
           docker compose --profile pipeline config --quiet
 
       - name: Deploy sem migracao e sem carga
-        shell: pwsh
+        shell: powershell
         run: ./scripts/deploy-local.ps1
 
       - name: Publicar evidencia do CD
