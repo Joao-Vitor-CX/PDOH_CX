@@ -1,7 +1,8 @@
 import io
+import os
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,14 +14,44 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bracell"))
 
 from src.data_quality import analisar_dataframe  # noqa: E402
+from src.database import criar_engine  # noqa: E402
 from src.identity import normalizar_identificador  # noqa: E402
 from src.legacy_fallbacks import observar_fallback_jornada, observar_fallbacks_entrada  # noqa: E402
-from src.observability import registrar_evento, registrar_oportunidades  # noqa: E402
+from src.observability import (  # noqa: E402
+    finalizar_execucao,
+    registrar_evento,
+    registrar_oportunidades,
+)
+from run_observado import _LogSeguro  # noqa: E402
 
 
 class _EngineIndisponivel:
     def begin(self):
         raise RuntimeError("controle indisponivel para teste")
+
+
+class _ConexaoCaptura:
+    def __init__(self):
+        self.comando = None
+        self.parametros = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, comando, parametros):
+        self.comando = str(comando)
+        self.parametros = parametros
+
+
+class _EngineCaptura:
+    def __init__(self):
+        self.conexao = _ConexaoCaptura()
+
+    def begin(self):
+        return self.conexao
 
 
 class ObservabilidadeTest(unittest.TestCase):
@@ -105,6 +136,60 @@ class ObservabilidadeTest(unittest.TestCase):
         self.assertEqual(0, total)
         self.assertIn("OBSERVABILIDADE_INDISPONIVEL", saida.getvalue())
 
+    def test_conexao_recusa_host_externo_antes_de_criar_engine(self):
+        saida = io.StringIO()
+        with (
+            patch.dict(os.environ, {"PDOH_DB_HOST": "mysql-producao.exemplo"}),
+            patch("src.database.create_engine") as construtor,
+            redirect_stderr(saida),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "nao esta autorizado"):
+                criar_engine()
+        construtor.assert_not_called()
+        self.assertIn("CONEXAO_BANCO_NAO_AUTORIZADA", saida.getvalue())
+
+    def test_conexao_aceita_somente_hosts_locais_previstos(self):
+        with patch("src.database.create_engine") as construtor:
+            for host in ("mysql", "localhost", "127.0.0.1", "MYSQL"):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "PDOH_DB_HOST": host,
+                        "PDOH_DB_USER": "pdoh_cx_app",
+                        "PDOH_DB_PASSWORD": "segredo_local_de_teste",
+                    },
+                ):
+                    criar_engine()
+        self.assertEqual(4, construtor.call_count)
+
+    def test_arquivo_de_log_indisponivel_nao_lanca_excecao(self):
+        # Um arquivo real usado como se fosse diretorio provoca FileExistsError
+        # antes de qualquer escrita e exercita a degradacao fail-open.
+        bloqueador = Path(__file__).resolve()
+        log = _LogSeguro(bloqueador / "execucao.log")
+        self.assertFalse(log.disponivel)
+        log.write("nao deve interromper")
+        log.flush()
+        log.close()
+
+    def test_finalizacao_registra_o_orquestrador_como_componente_atual(self):
+        engine = _EngineCaptura()
+        resumo = {
+            "status_execucao": "INICIADA",
+            "houve_persistencia": 0,
+            "total_alertas": 0,
+            "total_fallbacks": 0,
+        }
+        with (
+            patch("src.observability.obter_resumo_execucao", return_value=resumo),
+            patch.dict(os.environ, {"PDOH_EXECUTION_ID": "TESTE", "PDOH_COMPONENTE": "ORQUESTRADOR"}),
+        ):
+            status = finalizar_execucao(engine)
+
+        self.assertEqual("CONCLUIDA_SEM_RESULTADO", status)
+        self.assertIn("componente_atual = :componente", engine.conexao.comando)
+        self.assertEqual("ORQUESTRADOR", engine.conexao.parametros["componente"])
+
     def test_detector_de_fallback_nao_muta_e_reconhece_defaults_legados(self):
         checkin = pd.DataFrame(
             [{"colaborador": "Ana", "data_roteiro": "2026-09-01", "hora_saida": None}]
@@ -166,6 +251,24 @@ class ObservabilidadeTest(unittest.TestCase):
         self.assertIn("service_completed_successfully", compose)
         self.assertIn('profiles: ["pipeline"]', compose)
         self.assertIn("fallback_id", ddl)
+        trecho_pipeline = compose.split("  pipeline:", 1)[1].split("volumes:", 1)[0]
+        self.assertIn("condition: service_healthy", trecho_pipeline)
+        self.assertNotIn("service_completed_successfully", trecho_pipeline)
+
+    def test_runtime_tem_permissoes_minimas_no_controle(self):
+        script = (ROOT / "docker/mysql/scripts/run-migrations.sh").read_text(
+            encoding="utf-8"
+        ).lower()
+        self.assertIn(
+            "grant select, insert, update on pdoh_controle.* to '$pdoh_db_user'@'%'",
+            script,
+        )
+        self.assertNotIn("grant all privileges", script)
+        self.assertIn(
+            "grant create, alter, drop, index, references on produtos_platina.* "
+            "to '$pdoh_migration_user'@'%'",
+            script,
+        )
 
     def test_processadores_continuam_protegidos_pelo_manifesto(self):
         # A verificacao detalhada de SHA fica no contrato de replicacao. Este

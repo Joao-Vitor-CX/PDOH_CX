@@ -38,14 +38,36 @@ involves_bracell --SELECT--> ETL -> tratamento -> PDOH -> UPSERT Platina
                                       platina_relatorio_pdoh
 ```
 
-O usuário `pdoh_cx_app` possui somente `SELECT` em `involves_bracell` e
-permissões de escrita nos schemas locais `produtos_platina` e `pdoh_controle`.
+O usuário `pdoh_cx_app` possui somente `SELECT` em `involves_bracell` e apenas
+`SELECT`, `INSERT` e `UPDATE` nos schemas locais `produtos_platina` e
+`pdoh_controle`. O DDL é separado na conta local `pdoh_cx_migrator`.
 
 Detalhes: [docs/arquitetura.md](docs/arquitetura.md).
 
+## CI/CD
+
+A automacao foi separada em dois workflows:
+
+- `CI`: executa em Pull Request para `main`, valida isolamento, compila as
+  fontes, executa os testes, valida o Compose sem subir servicos, constroi a
+  imagem e confirma o usuario nao-root;
+- `CD`: executa depois de atualizacao da `main`, somente em runner Windows
+  self-hosted com o rotulo `pdoh-cx-local`. Antes do deploy, exige repositorio
+  `PDOH_CX`, PR mesclado e uma execucao aprovada do CI para o SHA do PR.
+
+O deploy constroi e recria exclusivamente o servico `backend` com `--no-deps`.
+Ele nao inicia `mysql`, `migrate` ou `pipeline`, nao aplica DDL e nao carrega
+dados. Snapshots somente leitura antes/depois devem permanecer identicos.
+
+O remoto do projeto original foi removido e nenhum `origin` esta configurado;
+por isso a validacao real por PR permanece pendente ate existir o repositorio
+GitHub separado `PDOH_CX`. Configuracao e evidencias:
+[docs/ci_cd.md](docs/ci_cd.md).
+
 ## Subir e validar o ambiente
 
-Pré-requisito: Docker Desktop com o engine Linux ativo e Compose v2.
+Pré-requisito: Docker Desktop com o engine Linux ativo, Compose v2 e um arquivo
+`.env` local criado a partir de `.env.example`, com senhas fortes próprias.
 
 ```bash
 docker compose up -d --build
@@ -55,7 +77,13 @@ docker compose logs backend
 O serviço `migrate` reaplica, de forma idempotente, todos os arquivos de
 `docker/mysql/migrations/` inclusive quando o volume já existe. O backend é um
 job de verificação e encerra em código `0` depois de imprimir `COMUNICACAO_OK`.
-O MySQL permanece ativo na porta local `3307` (configurável em `.env`).
+O mapeamento permitido do MySQL está limitado a `127.0.0.1:3307` (porta
+configurável em `.env`). Com a rede interna, o runtime atual não publica a porta
+em interfaces externas e não fornece saída externa aos containers.
+
+Por segurança, `PDOH_DB_HOST` aceita exclusivamente `mysql`, `localhost` ou
+`127.0.0.1`. Qualquer outro valor é recusado antes da criação do engine e gera um
+evento JSON `CONEXAO_BANCO_NAO_AUTORIZADA` no log do processo.
 
 Para repetir a verificação dos três schemas:
 
@@ -65,23 +93,23 @@ docker compose run --rm backend python -m src.healthcheck --wait
 
 ## Executar a esteira observada
 
-Depois de importar dados de homologação apenas nas cinco tabelas locais de
-`involves_bracell`, execute:
+Faça o bootstrap com `docker compose up -d --build` ao menos uma vez em cada
+volume novo. Depois de importar dados de homologação apenas nas cinco tabelas
+locais de `involves_bracell`, execute:
 
 ```bash
 docker compose --profile pipeline run --rm pipeline
 ```
 
 Isso executa, na mesma ordem atual, promotores e líderes com um único
-`execution_id`. O log completo fica em `bracell/logs/<execution_id>.log`.
+`execution_id`. O log completo fica em `bracell/logs/<execution_id>.log`. O
+pipeline depende diretamente do MySQL, e não da migração de controle, para que
+uma indisponibilidade da telemetria não bloqueie o processamento principal.
 
 Para reprocessar somente o processador Platina em um período explícito:
 
 ```bash
-docker compose --profile pipeline run --rm pipeline \
-  python run_observado.py \
-  --script pdoh_bracell_sem_atestados_e_declaracoes_medicas.py \
-  --data-inicio 2026-09-01 --data-fim 2026-09-06
+docker compose --profile pipeline run --rm pipeline python run_observado.py --script pdoh_bracell_sem_atestados_e_declaracoes_medicas.py --data-inicio 2026-09-01 --data-fim 2026-09-06
 ```
 
 O script atual de líderes mantém seu período interno e não persiste na Platina;
@@ -131,11 +159,18 @@ confirma que a quantidade de linhas da Platina não mudou:
 
 ```bash
 docker compose run --rm backend python -m src.validate_observability
+docker compose run --rm backend python -m src.validate_persistence
 ```
+
+O segundo comando usa a chave reservada
+`(__PDOH_CX_VALIDACAO_PERSISTENCIA__, 2099-12-31)`, confirma UPSERT e linhagem e
+reverte a linha sintética na própria transação. Ele aborta sem alterar nada se a
+chave já existir.
 
 Testes locais:
 
 ```bash
+python scripts/validate_cicd.py
 python -m unittest discover -s tests -v
 python -m compileall -q bracell tests
 docker compose config --quiet

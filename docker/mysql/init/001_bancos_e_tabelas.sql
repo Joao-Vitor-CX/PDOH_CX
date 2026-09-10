@@ -4,9 +4,8 @@ CREATE DATABASE IF NOT EXISTS involves_bracell
 CREATE DATABASE IF NOT EXISTS produtos_platina
     CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
-CREATE USER IF NOT EXISTS 'pdoh_cx_app'@'%' IDENTIFIED BY 'pdoh_cx_dev';
-GRANT SELECT ON involves_bracell.* TO 'pdoh_cx_app'@'%';
-GRANT ALL PRIVILEGES ON produtos_platina.* TO 'pdoh_cx_app'@'%';
+CREATE DATABASE IF NOT EXISTS pdoh_controle
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS involves_bracell.status_day_operacao_bracell (
     colaborador VARCHAR(255),
@@ -136,6 +135,4 @@ CREATE TABLE IF NOT EXISTS produtos_platina.exclusivo_bracell_platina_relatorio_
     INDEX idx_pdoh_data (data),
     INDEX idx_pdoh_superior (superior)
 ) ENGINE=InnoDB;
-
-FLUSH PRIVILEGES;
 

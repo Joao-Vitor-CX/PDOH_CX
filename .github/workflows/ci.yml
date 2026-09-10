@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Validacoes PDOH_CX
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Valores efemeros usados apenas para validar a interpolacao do Compose.
+      # O CI nao inicia o MySQL, nao aplica migracoes e nao executa o pipeline.
+      MYSQL_ROOT_PASSWORD: ci_local_root_placeholder
+      PDOH_DB_USER: pdoh_cx_app
+      PDOH_DB_PASSWORD: ci_local_app_placeholder
+      PDOH_MIGRATION_USER: pdoh_cx_migrator
+      PDOH_MIGRATION_PASSWORD: ci_local_migration_placeholder
+      PDOH_MYSQL_PORT: "3307"
+    steps:
+      - name: Baixar codigo
+        uses: actions/checkout@v5
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: bracell/requirements.txt
+
+      - name: Instalar dependencias
+        run: python -m pip install -r bracell/requirements.txt
+
+      - name: Validar isolamento e arquivos da esteira
+        run: python scripts/validate_cicd.py --output artifacts/ci-static.json
+
+      - name: Compilar fontes sem executar a aplicacao
+        run: python -m compileall -q bracell tests scripts
+
+      - name: Validar sintaxe do deploy PowerShell
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./scripts/deploy-local.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+
+      - name: Executar testes automatizados
+        run: python -m unittest discover -s tests -v
+
+      - name: Validar Docker Compose sem iniciar servicos
+        run: docker compose --profile pipeline config --quiet
+
+      - name: Construir imagem do backend
+        run: docker build --tag pdoh_cx:ci .
+
+      - name: Confirmar usuario nao-root da imagem
+        run: docker run --rm --entrypoint python pdoh_cx:ci -c "import os; assert os.getuid() == 10001, os.getuid()"
+
+      - name: Publicar evidencia do CI
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencia-ci-${{ github.event.pull_request.number }}
+          path: artifacts/ci-static.json
+          if-no-files-found: warn
+          retention-days: 30

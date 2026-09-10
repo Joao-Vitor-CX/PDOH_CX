@@ -33,14 +33,21 @@ class ContratoReplicacaoTest(unittest.TestCase):
         for tabela in tabelas:
             self.assertEqual(1, codigo.count(f"'{tabela}'"), tabela)
 
-    def test_persistencia_e_temporaria_ficam_na_platina(self):
+    def test_persistencia_direta_fica_na_platina_sem_ddl_no_runtime(self):
         codigo = (ROOT / "bracell/src/alch.py").read_text(encoding="utf-8")
         self.assertIn(
             'NOME_TABELA = "produtos_platina.'
             'exclusivo_bracell_platina_relatorio_pdoh"',
             codigo,
         )
-        self.assertIn('SCHEMA_TEMPORARIO = "produtos_platina"', codigo)
+        self.assertIn("ON DUPLICATE KEY UPDATE", codigo)
+        self.assertNotIn("SCHEMA_TEMPORARIO", codigo)
+        self.assertNotIn("df.to_sql(", codigo)
+        self.assertNotIn("DROP TABLE", codigo.upper())
+        validacao = (ROOT / "bracell/src/validate_persistence.py").read_text(
+            encoding="utf-8"
+        ).upper()
+        self.assertNotIn("DELETE FROM", validacao)
 
     def test_codigo_ativo_nao_consulta_nem_persiste_em_gold(self):
         for caminho in (ROOT / "bracell").rglob("*.py"):
@@ -74,15 +81,17 @@ class ContratoReplicacaoTest(unittest.TestCase):
         self.assertNotIn("gold", sql)
 
     def test_usuario_da_aplicacao_nao_escreve_na_origem(self):
-        sql = (ROOT / "docker/mysql/init/001_bancos_e_tabelas.sql").read_text(
+        script = (ROOT / "docker/mysql/scripts/run-migrations.sh").read_text(
             encoding="utf-8"
         ).lower()
         self.assertIn(
-            "grant select on involves_bracell.* to 'pdoh_cx_app'@'%'", sql
+            "grant select on involves_bracell.* to '$pdoh_db_user'@'%'", script
         )
         self.assertIn(
-            "grant all privileges on produtos_platina.* to 'pdoh_cx_app'@'%'", sql
+            "grant select, insert, update on produtos_platina.* to '$pdoh_db_user'@'%'",
+            script,
         )
+        self.assertNotIn("grant all privileges", script)
 
     def test_compose_declara_backend_mysql_healthcheck_e_volume(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -91,6 +100,24 @@ class ContratoReplicacaoTest(unittest.TestCase):
         self.assertIn("healthcheck:", compose)
         self.assertIn("pdoh_cx_mysql_data", compose)
         self.assertIn('PDOH_DB_HOST: mysql', compose)
+        self.assertIn('127.0.0.1:${PDOH_MYSQL_PORT:-3307}:3306', compose)
+        self.assertIn("internal: true", compose)
+        self.assertNotIn("pdoh_cx_dev", compose)
+        self.assertNotIn("pdoh_cx_root_dev", compose)
+
+    def test_backend_executa_sem_root_e_segredos_ficam_fora_da_imagem(self):
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        database = (ROOT / "bracell/src/database.py").read_text(encoding="utf-8")
+        init_sql = (ROOT / "docker/mysql/init/001_bancos_e_tabelas.sql").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("USER 10001:10001", dockerfile)
+        self.assertIn(".env", dockerignore.splitlines())
+        self.assertIn(".env", gitignore.splitlines())
+        self.assertNotIn("pdoh_cx_dev", database)
+        self.assertNotIn("IDENTIFIED BY", init_sql.upper())
 
     def test_healthcheck_e_somente_leitura(self):
         codigo = (ROOT / "bracell/src/healthcheck.py").read_text(

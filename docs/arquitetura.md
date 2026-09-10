@@ -10,7 +10,7 @@ Ela nunca devolve dados modificados ao processador.
 Existem três schemas locais:
 
 - `involves_bracell`: entrada; o usuário da aplicação tem somente `SELECT`;
-- `produtos_platina`: saída consolidada e staging técnica do UPSERT;
+- `produtos_platina`: saída consolidada do UPSERT;
 - `pdoh_controle`: telemetria, qualidade, auditoria e preparação de notificações.
 
 Não há FK de controle para as tabelas de origem ou para a Platina. A linhagem usa
@@ -29,11 +29,13 @@ hash da chave `(colaborador, data)` e preserva o contrato do destino.
 5. O tratamento atual ocorre sem mudança e suas contagens são registradas.
 6. O processador calcula normalmente. Linhas `AVISO:` já emitidas pelo legado são
    reconhecidas como fallback, sem interceptar ou substituir a tratativa.
-7. `src/alch.py` registra geração, tentativa, commit/rollback e, após o commit,
-   escreve a linhagem lateral. A transação do controle nunca é a transação da
-   Platina.
+7. `src/alch.py` realiza o UPSERT direto com `SELECT`, `INSERT` e `UPDATE`,
+   registra geração, tentativa, commit/rollback e escreve a linhagem lateral. A
+   transação do controle nunca é a transação da Platina.
 8. O executor verifica retorno e `Erro na automação.txt` após cada subprocesso.
-   Isso impede falso sucesso quando o `try/except` legado absorve a exceção.
+   Isso impede falso sucesso na telemetria quando o `try/except` legado absorve
+   a exceção; o código de saída do processo continua preservando o comportamento
+   legado.
 9. A execução termina como `CONCLUIDA`, `CONCLUIDA_COM_ALERTAS`,
    `CONCLUIDA_SEM_RESULTADO` ou `FALHA_TECNICA`.
 
@@ -87,15 +89,34 @@ Condições que ativam defaults existentes são registradas sem reaplicar o defa
 - nulos de pesquisa que o legado transforma na data/hora de 1999;
 - avisos legados de ausência de dados de ócio.
 
-Eventos relevantes geram uma linha na outbox com marca, problema, data, impacto e
-`execution_id`. A outbox é somente preparação arquitetural: nenhum entregador ou
-integração externa foi criado.
+Oportunidades e fallbacks de severidade alta ou crítica geram uma linha na outbox
+com marca, problema, data, impacto e `execution_id`. A outbox é somente preparação
+arquitetural: nenhum entregador ou integração externa foi criado.
 
 ## Migrações e resiliência
 
 `docker/mysql/init/001_bancos_e_tabelas.sql` inicializa origem e Platina somente
-quando o volume nasce. O serviço `migrate` executa em ordem todos os scripts de
-`docker/mysql/migrations/` a cada inicialização, cobrindo também volumes existentes.
+quando o volume nasce. No bootstrap `docker compose up -d --build`, o serviço
+`migrate` executa em ordem todos os scripts de `docker/mysql/migrations/`, cobrindo
+também volumes existentes. O pipeline depende apenas do MySQL saudável: assim,
+depois do bootstrap, uma indisponibilidade de `pdoh_controle` não impede a esteira
+de negócio nem a persistência Platina.
+
+O bootstrap cria duas contas separadas. `pdoh_cx_app` tem leitura na origem e
+somente `SELECT`, `INSERT` e `UPDATE` em controle e Platina. A conta
+`pdoh_cx_migrator` recebe apenas os privilégios DDL necessários nos schemas
+locais e não é entregue ao backend ou ao pipeline.
+
+## Isolamento local
+
+- a porta MySQL é publicada somente em `127.0.0.1`;
+- a rede `pdoh_cx_network` é interna;
+- o backend e o pipeline executam com UID/GID `10001`, sem root e com
+  `no-new-privileges`;
+- `.env` é ignorado pelo Git e pelo contexto de build;
+- nenhum segredo possui valor padrão no Compose;
+- a criação do engine recusa qualquer host diferente de `mysql`, `localhost` e
+  `127.0.0.1` antes de tentar a conexão.
 
 Todas as funções públicas de observabilidade capturam falhas, emitem um registro
 JSON `OBSERVABILIDADE_INDISPONIVEL` e retornam ao chamador. A única exceção é a

@@ -43,11 +43,64 @@ SCRIPTS_PERMITIDOS = {
 }
 
 
+class _LogSeguro:
+    """Arquivo lateral que degrada para descarte sem afetar os subprocessos."""
+
+    def __init__(self, caminho: Path):
+        self.caminho = caminho
+        self.erro: Exception | None = None
+        self._arquivo = None
+        try:
+            caminho.parent.mkdir(parents=True, exist_ok=True)
+            self._arquivo = caminho.open("a", encoding="utf-8", newline="")
+        except Exception as exc:
+            self.erro = exc
+
+    @property
+    def disponivel(self) -> bool:
+        return self._arquivo is not None
+
+    def write(self, conteudo: str) -> None:
+        if self._arquivo is None:
+            return
+        try:
+            self._arquivo.write(conteudo)
+        except Exception as exc:
+            self.erro = exc
+            try:
+                self._arquivo.close()
+            except Exception:
+                pass
+            self._arquivo = None
+
+    def flush(self) -> None:
+        if self._arquivo is None:
+            return
+        try:
+            self._arquivo.flush()
+        except Exception as exc:
+            self.erro = exc
+            try:
+                self._arquivo.close()
+            except Exception:
+                pass
+            self._arquivo = None
+
+    def close(self) -> None:
+        if self._arquivo is not None:
+            try:
+                self._arquivo.close()
+            except Exception as exc:
+                self.erro = exc
+            finally:
+                self._arquivo = None
+
+
 def _assinatura_arquivo(caminho: Path) -> tuple[int, int] | None:
     try:
         status = caminho.stat()
         return status.st_mtime_ns, status.st_size
-    except FileNotFoundError:
+    except Exception:
         return None
 
 
@@ -83,17 +136,29 @@ def _executar_componente(
         contexto={"script": script},
     )
     comando = [sys.executable, str(BASE_DIR / script), *argumentos_script]
-    processo = subprocess.Popen(
-        comando,
-        cwd=BASE_DIR,
-        env=ambiente,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
+    try:
+        processo = subprocess.Popen(
+            comando,
+            cwd=BASE_DIR,
+            env=ambiente,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except Exception as exc:
+        mensagem = f"Nao foi possivel iniciar o componente {componente}: {exc}"
+        registrar_erro_tecnico(
+            engine,
+            etapa="PROCESSAMENTO_PDOH",
+            mensagem=mensagem,
+            excecao=exc,
+        )
+        arquivo_log.write(f"[ERRO_INICIALIZACAO] {mensagem}\n")
+        arquivo_log.flush()
+        return 127, mensagem
     assert processo.stdout is not None
     for linha in processo.stdout:
         sys.stdout.write(linha)
@@ -162,9 +227,8 @@ def main() -> int:
     argumentos_script = [args.data_inicio, args.data_fim] if args.data_inicio else []
     execution_id = definir_execution_id(gerar_execution_id("BRACELL"))
     os.environ["PDOH_COMPONENTE"] = "ORQUESTRADOR"
-    logs_dir = BASE_DIR / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    caminho_log = logs_dir / f"{execution_id}.log"
+    caminho_log = BASE_DIR / "logs" / f"{execution_id}.log"
+    arquivo_log = _LogSeguro(caminho_log)
 
     engine = criar_engine("involves_bracell")
     try:
@@ -190,36 +254,47 @@ def main() -> int:
         etapa="INICIALIZACAO",
         contexto={"scripts": scripts, "arquivo_log": str(caminho_log)},
     )
+    if arquivo_log.erro:
+        registrar_evento(
+            engine,
+            nivel="ALERTA",
+            categoria="OBSERVABILIDADE",
+            codigo="ARQUIVO_LOG_INDISPONIVEL",
+            mensagem="O arquivo lateral de log nao esta disponivel; banco e console continuam ativos.",
+            etapa="INICIALIZACAO",
+            contexto={"erro": str(arquivo_log.erro)[:1000]},
+        )
 
     primeiro_codigo_nao_zero = 0
     houve_erro_legado = False
-    with caminho_log.open("a", encoding="utf-8", newline="") as arquivo_log:
-        arquivo_log.write(f"execution_id={execution_id}\n")
-        arquivo_log.write(f"scripts={','.join(scripts)}\n")
-        arquivo_log.write("status=INICIADA\n")
-        for script in scripts:
-            retorno, erro_arquivo = _executar_componente(
-                engine,
-                script,
-                argumentos_script,
-                arquivo_log,
-            )
-            houve_erro_legado = houve_erro_legado or bool(erro_arquivo)
-            if retorno != 0:
-                primeiro_codigo_nao_zero = retorno
-                # Equivale ao set -e do exec_pdoh_main.sh anterior.
-                break
+    arquivo_log.write(f"execution_id={execution_id}\n")
+    arquivo_log.write(f"scripts={','.join(scripts)}\n")
+    arquivo_log.write("status=INICIADA\n")
+    for script in scripts:
+        retorno, erro_arquivo = _executar_componente(
+            engine,
+            script,
+            argumentos_script,
+            arquivo_log,
+        )
+        houve_erro_legado = houve_erro_legado or bool(erro_arquivo)
+        if retorno != 0:
+            primeiro_codigo_nao_zero = retorno
+            # Equivale ao set -e do exec_pdoh_main.sh anterior.
+            break
 
+    os.environ["PDOH_COMPONENTE"] = "ORQUESTRADOR"
     resumo = obter_resumo_execucao(engine)
     if houve_erro_legado or primeiro_codigo_nao_zero or resumo.get("status_execucao") == "FALHA_TECNICA":
         status_final = finalizar_execucao(engine, status="FALHA_TECNICA")
     else:
         status_final = finalizar_execucao(engine)
-    with caminho_log.open("a", encoding="utf-8", newline="") as arquivo_log:
-        arquivo_log.write(f"status_final={status_final}\n")
+    arquivo_log.write(f"status_final={status_final}\n")
+    arquivo_log.flush()
+    arquivo_log.close()
 
     print(f"EXECUTION_ID={execution_id}")
-    print(f"LOG_EXECUCAO={caminho_log}")
+    print(f"LOG_EXECUCAO={caminho_log if arquivo_log.erro is None else 'INDISPONIVEL'}")
     # O retorno do subprocesso e preservado. Erros engolidos pelo legado ficam
     # corretamente classificados no controle, mas continuam retornando zero.
     return primeiro_codigo_nao_zero

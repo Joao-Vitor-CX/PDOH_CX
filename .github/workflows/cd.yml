@@ -1,0 +1,109 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: SHA, tag ou branch ja validada pelo CI.
+        required: false
+        default: main
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: deploy-pdoh-cx-local
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy local isolado
+    runs-on: [self-hosted, Windows, pdoh-cx-local]
+    environment: pdoh-cx-local
+    timeout-minutes: 20
+    env:
+      PDOH_CX_ALLOWED_REPOSITORY: ${{ vars.PDOH_CX_GITHUB_REPOSITORY }}
+      PDOH_DB_USER: ${{ vars.PDOH_DB_USER }}
+      PDOH_DB_PASSWORD: ${{ secrets.PDOH_DB_PASSWORD }}
+      PDOH_MIGRATION_USER: ${{ vars.PDOH_MIGRATION_USER }}
+      PDOH_MIGRATION_PASSWORD: ${{ secrets.PDOH_MIGRATION_PASSWORD }}
+      MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+      PDOH_MYSQL_PORT: ${{ vars.PDOH_MYSQL_PORT }}
+    steps:
+      - name: Validar repositorio de destino
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PDOH_CX_ALLOWED_REPOSITORY)) {
+            throw "Defina a variavel PDOH_CX_GITHUB_REPOSITORY no ambiente pdoh-cx-local."
+          }
+          if ($env:GITHUB_REPOSITORY -ne $env:PDOH_CX_ALLOWED_REPOSITORY) {
+            throw "Deploy recusado: repositorio diferente do PDOH_CX autorizado."
+          }
+          if ($env:GITHUB_REPOSITORY -notmatch '(?i)/PDOH_CX$') {
+            throw "Deploy recusado: o repositorio deve se chamar PDOH_CX."
+          }
+
+      - name: Baixar revisao
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Identificar revisao
+        id: revision
+        shell: pwsh
+        run: "Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value \"sha=$(git rev-parse HEAD)\""
+
+      - name: Exigir PR com CI aprovado
+        uses: actions/github-script@v8
+        env:
+          DEPLOY_SHA: ${{ steps.revision.outputs.sha }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = process.env.DEPLOY_SHA;
+            const { data: pulls } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner, repo, commit_sha: sha,
+            });
+            const pull = pulls.find((item) => item.merged_at && item.base.ref === 'main');
+            if (!pull) {
+              core.setFailed(`Deploy recusado: ${sha} nao esta associado a PR mesclado em main.`);
+              return;
+            }
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner,
+              repo,
+              workflow_id: 'ci.yml',
+              head_sha: pull.head.sha,
+              event: 'pull_request',
+              status: 'completed',
+              per_page: 100,
+            });
+            const aprovado = runs.some((run) => run.conclusion === 'success');
+            if (!aprovado) {
+              core.setFailed(`Deploy recusado: PR #${pull.number} nao possui execucao CI aprovada.`);
+            }
+
+      - name: Validar arquivos e configuracao
+        shell: pwsh
+        run: |
+          python scripts/validate_cicd.py --check-remote --output artifacts/cd-static.json
+          docker compose --profile pipeline config --quiet
+
+      - name: Deploy sem migracao e sem carga
+        shell: pwsh
+        run: ./scripts/deploy-local.ps1
+
+      - name: Publicar evidencia do CD
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencia-cd-${{ steps.revision.outputs.sha }}
+          path: artifacts/*.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -8,5 +8,11 @@ bracell/logs/*
 !bracell/logs/.gitkeep
 tests/
 relatorios_validacao/
+artifacts/
+.github/
+.gitignore
+.gitattributes
 .git/
 .env
+.env.*
+!.env.example

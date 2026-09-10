@@ -6,4 +6,11 @@ bracell/outputs/*.xlsx
 bracell/logs/*.log
 bracell/Erro na automação.txt
 relatorios_validacao/
+artifacts/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+SECRETS-*.env
+*-HANDOFF.env

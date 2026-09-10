@@ -671,11 +671,13 @@ def finalizar_execucao(engine, status: str | None = None, erro_resumo: str | Non
                 text(
                     "UPDATE pdoh_controle.execucao SET status_execucao = :status, "
                     "finalizado_em = CURRENT_TIMESTAMP(6), etapa_atual = 'FINALIZACAO', "
+                    "componente_atual = :componente, "
                     "erro_resumo = COALESCE(:erro, erro_resumo) WHERE execution_id = :id"
                 ),
                 {
                     "id": obter_execution_id(),
                     "status": status_final,
+                    "componente": obter_componente(),
                     "erro": _texto(erro_resumo, 65000),
                 },
             )

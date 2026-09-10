@@ -6,10 +6,10 @@ services:
     container_name: pdoh_cx_mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-pdoh_cx_root_dev}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Defina MYSQL_ROOT_PASSWORD no arquivo .env}
       TZ: America/Sao_Paulo
     ports:
-      - "${PDOH_MYSQL_PORT:-3307}:3306"
+      - "127.0.0.1:${PDOH_MYSQL_PORT:-3307}:3306"
     volumes:
       - pdoh_cx_mysql_data:/var/lib/mysql
       - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
@@ -29,18 +29,18 @@ services:
   migrate:
     image: mysql:8.4
     environment:
-      MYSQL_PWD: ${MYSQL_ROOT_PASSWORD:-pdoh_cx_root_dev}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Defina MYSQL_ROOT_PASSWORD no arquivo .env}
+      PDOH_DB_USER: ${PDOH_DB_USER:?Defina PDOH_DB_USER no arquivo .env}
+      PDOH_DB_PASSWORD: ${PDOH_DB_PASSWORD:?Defina PDOH_DB_PASSWORD no arquivo .env}
+      PDOH_MIGRATION_USER: ${PDOH_MIGRATION_USER:?Defina PDOH_MIGRATION_USER no arquivo .env}
+      PDOH_MIGRATION_PASSWORD: ${PDOH_MIGRATION_PASSWORD:?Defina PDOH_MIGRATION_PASSWORD no arquivo .env}
     depends_on:
       mysql:
         condition: service_healthy
-    command:
-      [
-        "sh",
-        "-ec",
-        "for migration in /migrations/*.sql; do mysql -h mysql -uroot --default-character-set=utf8mb4 < \"$$migration\"; done",
-      ]
+    command: ["sh", "/scripts/run-migrations.sh"]
     volumes:
       - ./docker/mysql/migrations:/migrations:ro
+      - ./docker/mysql/scripts:/scripts:ro
     networks:
       - pdoh_cx_network
 
@@ -53,9 +53,11 @@ services:
     environment:
       PDOH_DB_HOST: mysql
       PDOH_DB_PORT: "3306"
-      PDOH_DB_USER: pdoh_cx_app
-      PDOH_DB_PASSWORD: pdoh_cx_dev
+      PDOH_DB_USER: ${PDOH_DB_USER:?Defina PDOH_DB_USER no arquivo .env}
+      PDOH_DB_PASSWORD: ${PDOH_DB_PASSWORD:?Defina PDOH_DB_PASSWORD no arquivo .env}
       TZ: America/Sao_Paulo
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -75,9 +77,11 @@ services:
     environment:
       PDOH_DB_HOST: mysql
       PDOH_DB_PORT: "3306"
-      PDOH_DB_USER: pdoh_cx_app
-      PDOH_DB_PASSWORD: pdoh_cx_dev
+      PDOH_DB_USER: ${PDOH_DB_USER:?Defina PDOH_DB_USER no arquivo .env}
+      PDOH_DB_PASSWORD: ${PDOH_DB_PASSWORD:?Defina PDOH_DB_PASSWORD no arquivo .env}
       TZ: America/Sao_Paulo
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       mysql:
         condition: service_healthy
@@ -95,3 +99,4 @@ volumes:
 networks:
   pdoh_cx_network:
     name: pdoh_cx_network
+    internal: true

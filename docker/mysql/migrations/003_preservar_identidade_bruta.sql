@@ -98,11 +98,3 @@ SET @ddl_referencia_check = IF(
 PREPARE stmt_referencia_check FROM @ddl_referencia_check;
 EXECUTE stmt_referencia_check;
 DEALLOCATE PREPARE stmt_referencia_check;
-
--- Runtime nao precisa criar/apagar objetos no schema lateral.
-REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'pdoh_cx_app'@'%';
-GRANT SELECT ON involves_bracell.* TO 'pdoh_cx_app'@'%';
-GRANT ALL PRIVILEGES ON produtos_platina.* TO 'pdoh_cx_app'@'%';
-GRANT SELECT, INSERT, UPDATE ON pdoh_controle.* TO 'pdoh_cx_app'@'%';
-
-FLUSH PRIVILEGES;

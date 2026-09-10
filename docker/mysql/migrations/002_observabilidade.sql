@@ -1,9 +1,6 @@
 CREATE DATABASE IF NOT EXISTS pdoh_controle
     CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
-CREATE USER IF NOT EXISTS 'pdoh_cx_app'@'%' IDENTIFIED BY 'pdoh_cx_dev';
-GRANT SELECT, INSERT, UPDATE ON pdoh_controle.* TO 'pdoh_cx_app'@'%';
-
 CREATE TABLE IF NOT EXISTS pdoh_controle.execucao (
     execution_id VARCHAR(80) NOT NULL,
     marca VARCHAR(80) NOT NULL,
@@ -243,5 +240,3 @@ CREATE TABLE IF NOT EXISTS pdoh_controle.saida_linhagem (
     INDEX idx_linhagem_chave (chave_negocio_hash),
     INDEX idx_linhagem_colaborador_data (colaborador, data_referencia)
 ) ENGINE=InnoDB;
-
-FLUSH PRIVILEGES;

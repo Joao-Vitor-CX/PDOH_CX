@@ -5,7 +5,6 @@ from sqlalchemy import text
 
 from .observability import (
     iniciar_execucao,
-    obter_execution_id,
     registrar_erro_tecnico,
     registrar_etapa,
     registrar_linhagem_saida,
@@ -13,7 +12,6 @@ from .observability import (
 )
 
 NOME_TABELA = "produtos_platina.exclusivo_bracell_platina_relatorio_pdoh"
-SCHEMA_TEMPORARIO = "produtos_platina"
 
 # Colunas da chave unica `uk_pdoh_colab_data` da Platina — nao entram no UPDATE.
 COLUNAS_CHAVE = ("colaborador", "data")
@@ -51,16 +49,38 @@ def _normalizar_vazios(df, engine):
     return df
 
 
-def inserir_produto(df, engine):
+def _valor_sql(valor):
+    """Converte escalares pandas/numpy para tipos aceitos pelo driver MySQL."""
+
+    if isinstance(valor, pd.Timestamp):
+        return valor.to_pydatetime()
+    if isinstance(valor, pd.Timedelta):
+        return valor.to_pytimedelta()
+    try:
+        if pd.isna(valor):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(valor, "item"):
+        return valor.item()
+    return valor
+
+
+def _identificador(nome):
+    return f"`{str(nome).replace('`', '``')}`"
+
+
+def inserir_produto(df, engine, *, connection=None):
     """
     Realiza um "UPSERT" (INSERT ou UPDATE) de um DataFrame na tabela Platina.
 
-    Utiliza uma tabela temporária para garantir performance e segurança.
-    Se um registro com a mesma chave única (colaborador, data) já existe,
-    ele será atualizado; caso contrário, será inserido.
+    Executa o mesmo INSERT ... ON DUPLICATE KEY UPDATE diretamente, sem exigir
+    privilegios DDL da conta da aplicacao. Se um registro com a mesma chave
+    unica (colaborador, data) ja existe, ele e atualizado; caso contrario, e
+    inserido.
 
     Substitui a antiga estrategia de DELETE da janela [min(data), max(data)]
-    seguida de df.to_sql(if_exists='append'). O UPSERT e' idempotente sem
+    seguida de carga tabular em modo append. O UPSERT e' idempotente sem
     precisar apagar nada, entao um run que falhe no meio nao deixa mais a
     janela vazia na tabela Platina.
 
@@ -71,6 +91,8 @@ def inserir_produto(df, engine):
     Args:
         df: O DataFrame a ser inserido/atualizado.
         engine: O objeto de conexão SQLAlchemy.
+        connection: Conexao transacional opcional, usada somente pelos testes
+            tecnicos que precisam validar e reverter a linha sintetica.
     """
     iniciar_execucao(engine)
     if df.empty:
@@ -85,12 +107,6 @@ def inserir_produto(df, engine):
         )
         return
 
-    # Sufixo tecnico: evita colisao entre execucoes, sem alterar dados de negocio.
-    sufixo_execucao = "".join(
-        caractere.lower() for caractere in (obter_execution_id() or "sem_id") if caractere.isalnum()
-    )[-16:]
-    nome_tabela_temporaria = f"tmp_pdoh_platina_{sufixo_execucao}"
-
     try:
         df = _normalizar_vazios(df, engine)
     except Exception as exc:
@@ -103,78 +119,79 @@ def inserir_produto(df, engine):
         raise
 
     cols = df.columns.tolist()
+    parametros = [f"valor_{indice}" for indice in range(len(cols))]
+    registros = [
+        {
+            parametro: _valor_sql(valor)
+            for parametro, valor in zip(parametros, linha)
+        }
+        for linha in df.itertuples(index=False, name=None)
+    ]
 
     # Monta a parte UPDATE — colunas que NÃO são chave primária
-    update_cols = [f"`{col}` = VALUES(`{col}`)" for col in cols if col.lower() not in COLUNAS_CHAVE]
+    update_cols = [
+        f"{_identificador(col)} = VALUES({_identificador(col)})"
+        for col in cols
+        if col.lower() not in COLUNAS_CHAVE
+    ]
     update_clause = ", ".join(update_cols)
+    colunas_sql = ", ".join(_identificador(col) for col in cols)
+    valores_sql = ", ".join(f":{parametro}" for parametro in parametros)
 
     upsert_query = text(f"""
-        INSERT INTO {NOME_TABELA} (`{'`, `'.join(cols)}`)
-        SELECT `{'`, `'.join(cols)}`
-        FROM `{SCHEMA_TEMPORARIO}`.`{nome_tabela_temporaria}`
+        INSERT INTO {NOME_TABELA} ({colunas_sql})
+        VALUES ({valores_sql})
         ON DUPLICATE KEY UPDATE {update_clause};
     """)
 
-    with engine.connect() as connection:
-        transaction = None
-        try:
-            transaction = connection.begin()
-            print(f"\nIniciando processo de UPSERT para a tabela '{NOME_TABELA}'...")
-            registrar_etapa(
-                engine,
-                etapa="PROCESSAMENTO_PDOH",
-                status="CONCLUIDA",
-                linhas_geradas=len(df),
-                mensagem="Resultado PDOH entregue para persistencia sem alteracao de calculo.",
-            )
-            registrar_etapa(
-                engine,
-                etapa="PERSISTENCIA_PLATINA",
-                status="INICIADA",
-                linhas_geradas=len(df),
-                mensagem="UPSERT Platina iniciado.",
-            )
+    conexao_propria = connection is None
+    conexao = connection or engine.connect()
+    transaction = conexao.begin() if conexao_propria else None
+    try:
+        print(f"\nIniciando processo de UPSERT para a tabela '{NOME_TABELA}'...")
+        registrar_etapa(
+            engine,
+            etapa="PROCESSAMENTO_PDOH",
+            status="CONCLUIDA",
+            linhas_geradas=len(df),
+            mensagem="Resultado PDOH entregue para persistencia sem alteracao de calculo.",
+        )
+        registrar_etapa(
+            engine,
+            etapa="PERSISTENCIA_PLATINA",
+            status="INICIADA",
+            linhas_geradas=len(df),
+            mensagem="UPSERT Platina iniciado.",
+        )
 
-            # Passo 1: Envia dados para tabela temporária
-            print(f" -> Criando tabela temporária '{nome_tabela_temporaria}' com {len(df)} registros...")
-            df.to_sql(nome_tabela_temporaria,
-                      con=connection,
-                      schema=SCHEMA_TEMPORARIO,
-                      if_exists='replace',
-                      index=False)
+        print(" -> Executando INSERT ... ON DUPLICATE KEY UPDATE direto...")
+        result = conexao.execute(upsert_query, registros)
 
-            # Passo 2: Executa UPSERT
-            print(f" -> Executando INSERT ... ON DUPLICATE KEY UPDATE...")
-            result = connection.execute(upsert_query)
-
-            # Passo 3: Commit
+        if transaction is not None:
             transaction.commit()
-            print(f" -> Processo concluído com sucesso. Linhas afetadas: {result.rowcount}.")
-            registrar_resultado_persistencia(
-                engine,
-                linhas_geradas=len(df),
-                linhas_persistidas=len(df),
-                afetadas_banco=result.rowcount,
-            )
-            registrar_linhagem_saida(engine, df, NOME_TABELA)
+        print(f" -> Processo concluído com sucesso. Linhas afetadas: {result.rowcount}.")
+        registrar_resultado_persistencia(
+            engine,
+            linhas_geradas=len(df),
+            linhas_persistidas=len(df),
+            afetadas_banco=result.rowcount,
+        )
+        registrar_linhagem_saida(engine, df, NOME_TABELA)
 
-        except Exception as e:
-            print(f"ERRO durante o processo de UPSERT: {e}")
-            if transaction:
-                transaction.rollback()
-            registrar_erro_tecnico(
-                engine,
-                etapa="PERSISTENCIA_PLATINA",
-                mensagem=f"Falha durante o UPSERT Platina: {e}",
-                excecao=e,
-            )
-        finally:
-            # Passo 4: Remove tabela temporária
-            print(f" -> Removendo tabela temporária...")
+    except Exception as e:
+        print(f"ERRO durante o processo de UPSERT: {e}")
+        if transaction is not None and transaction.is_active:
+            transaction.rollback()
+        registrar_erro_tecnico(
+            engine,
+            etapa="PERSISTENCIA_PLATINA",
+            mensagem=f"Falha durante o UPSERT Platina: {e}",
+            excecao=e,
+        )
+    finally:
+        if conexao_propria:
             try:
-                connection.execute(text(
-                    f"DROP TABLE IF EXISTS `{SCHEMA_TEMPORARIO}`.`{nome_tabela_temporaria}`"
-                ))
-                connection.commit()
-            except Exception:
-                pass
+                if transaction is not None and transaction.is_active:
+                    transaction.rollback()
+            finally:
+                conexao.close()
