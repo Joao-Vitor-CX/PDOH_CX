@@ -180,3 +180,6 @@ As tabelas de origem nascem vazias. Com origem vazia, os processadores replicado
 atingem uma falha já existente ao operar um DataFrame sem índice; o executor agora
 classifica corretamente o caso como `FALHA_TECNICA`, mas não altera essa regra ou
 mascara o problema.
+
+
+Validação inicial da esteira CI/CD do PDOH_CX.
