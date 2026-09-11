@@ -68,6 +68,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Configurar diretorio seguro do Git
+        shell: powershell
+        run: |
+          git config --global --add safe.directory "$env:GITHUB_WORKSPACE"
+
       - name: Identificar revisao
         id: revision
         shell: powershell
