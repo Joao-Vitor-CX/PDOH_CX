@@ -34,6 +34,20 @@ jobs:
       MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
       PDOH_MYSQL_PORT: ${{ vars.PDOH_MYSQL_PORT }}
     steps:
+      - name: Debug variaveis do runner
+        shell: powershell
+        run: |
+          Write-Host "=== Ambiente GitHub Actions ==="
+
+          Write-Host "PDOH_CX_GITHUB_REPOSITORY:"
+          Write-Host $env:PDOH_CX_GITHUB_REPOSITORY
+
+          Write-Host "PDOH_CX_ALLOWED_REPOSITORY:"
+          Write-Host $env:PDOH_CX_ALLOWED_REPOSITORY
+
+          Write-Host "Repository atual:"
+          Write-Host $env:GITHUB_REPOSITORY
+
       - name: Validar repositorio de destino
         shell: powershell
         run: |
