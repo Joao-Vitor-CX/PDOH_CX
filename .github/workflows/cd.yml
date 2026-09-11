@@ -34,6 +34,20 @@ jobs:
       MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
       PDOH_MYSQL_PORT: ${{ vars.PDOH_MYSQL_PORT }}
     steps:
+      - name: Debug variaveis do runner
+        shell: powershell
+        run: |
+          Write-Host "=== Ambiente GitHub Actions ==="
+
+          Write-Host "PDOH_CX_GITHUB_REPOSITORY:"
+          Write-Host $env:PDOH_CX_GITHUB_REPOSITORY
+
+          Write-Host "PDOH_CX_ALLOWED_REPOSITORY:"
+          Write-Host $env:PDOH_CX_ALLOWED_REPOSITORY
+
+          Write-Host "Repository atual:"
+          Write-Host $env:GITHUB_REPOSITORY
+
       - name: Validar repositorio de destino
         shell: powershell
         run: |
@@ -53,6 +67,11 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Configurar diretorio seguro do Git
+        shell: powershell
+        run: |
+          git config --global --add safe.directory "$env:GITHUB_WORKSPACE"
 
       - name: Identificar revisao
         id: revision
@@ -105,5 +124,5 @@ jobs:
         with:
           name: evidencia-cd-${{ steps.revision.outputs.sha }}
           path: artifacts/*.json
-          if-no-files-found: warn
+          if-no-files-found: ignore
           retention-days: 30
