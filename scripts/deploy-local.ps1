@@ -16,7 +16,7 @@ function Assert-EnvironmentVariable {
 function Get-HealthSnapshot {
     $output = @(
         & docker compose run --rm --no-deps backend `
-            python -m src.healthcheck --wait --tentativas 10 --intervalo 1 2>&1
+            python -m src.healthcheck --wait --tentativas 10 --intervalo 1
     )
     $exitCode = $LASTEXITCODE
     $output | ForEach-Object { Write-Host $_ }
