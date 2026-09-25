@@ -2,6 +2,8 @@
 **/*.py[cod]
 **/venv/
 **/.venv/
+**/.venv*/
+**/venv*/
 bracell/outputs/*
 !bracell/outputs/.gitkeep
 bracell/logs/*

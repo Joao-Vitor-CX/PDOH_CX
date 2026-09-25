@@ -66,6 +66,23 @@ def _valor_sql(valor):
     return valor
 
 
+def filtrar_vinculo_do_dia(df, ativos_por_dia):
+    """Mantem so' colaborador x dia com vinculo ativo no cadastro vigente naquele dia.
+
+    O processador gera uma linha por dia para todo colaborador do cadastro do periodo; quem
+    saiu no meio da semana (ou ainda nao tinha entrado) nao pode ganhar horas programadas nos
+    dias sem vinculo. Dias sem cadastro conhecido nao sao filtrados. Devolve (df, removidas).
+    """
+    if not ativos_por_dia or df.empty or not {'colaborador', 'data'} <= set(df.columns):
+        return df, []
+    dias = pd.to_datetime(df['data'], errors='coerce').dt.strftime('%Y-%m-%d')
+    nomes = df['colaborador'].map(lambda v: ' '.join(str(v or '').upper().split()))
+    manter = [dia not in ativos_por_dia or nome in ativos_por_dia[dia] for dia, nome in zip(dias, nomes)]
+    mascara = pd.Series(manter, index=df.index)
+    removidas = sorted({(n, d) for n, d, m in zip(nomes, dias, manter) if not m})
+    return df[mascara].copy(), removidas
+
+
 def _identificador(nome):
     return f"`{str(nome).replace('`', '``')}`"
 
@@ -105,6 +122,21 @@ def inserir_produto(df, engine, *, connection=None):
             linhas_persistidas=0,
             mensagem="DataFrame final vazio; comportamento atual preservado.",
         )
+        return
+
+    from .data_loader import VIGENCIA_DO_PERIODO
+    df, removidas = filtrar_vinculo_do_dia(df, VIGENCIA_DO_PERIODO)
+    if removidas:
+        registrar_etapa(
+            engine,
+            etapa="VINCULO_DO_DIA",
+            status="CONCLUIDA",
+            linhas_geradas=len(removidas),
+            mensagem=(f"{len(removidas)} linha(s) sem vinculo no cadastro do dia nao foram gravadas: "
+                      + ", ".join(f"{n} {d}" for n, d in removidas[:30])),
+        )
+        print(f" -> {len(removidas)} linha(s) colaborador x dia sem vinculo no cadastro do dia descartadas.")
+    if df.empty:
         return
 
     try:

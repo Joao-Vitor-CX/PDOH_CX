@@ -17,6 +17,11 @@ from typing import Any, Iterable
 from sqlalchemy import text
 
 from .database import criar_engine
+from shared.treatment_catalog import (
+    classificacao_efetiva,
+    listar_regras as _listar_regras_catalogo,
+    resolver_regra as _resolver_regra_catalogo,
+)
 
 
 SCHEMA_CONTROLE = "pdoh_controle"
@@ -108,6 +113,8 @@ def iniciar_execucao(
     periodo_inicio: Any = None,
     periodo_fim: Any = None,
     componente: str | None = None,
+    operacao: str = 'EXCLUSIVA',
+    finalidade: str | None = None,
 ) -> str:
     execution_id = definir_execution_id(execution_id or obter_execution_id() or gerar_execution_id(marca))
     componente = componente or obter_componente()
@@ -115,9 +122,9 @@ def iniciar_execucao(
         engine = engine or criar_engine()
         comando = text(
             "INSERT INTO pdoh_controle.execucao "
-            "(execution_id, marca, periodo_inicio, periodo_fim, status_execucao, "
+            "(execution_id, marca, operacao, periodo_inicio, periodo_fim, status_execucao, "
             " componente_atual, etapa_atual, versao_aplicacao) "
-            "VALUES (:id, :marca, :inicio, :fim, 'INICIADA', :componente, 'INICIALIZACAO', :versao) "
+            "VALUES (:id, :marca, :operacao, :inicio, :fim, 'INICIADA', :componente, 'INICIALIZACAO', :versao) "
             "ON DUPLICATE KEY UPDATE "
             "periodo_inicio = COALESCE(VALUES(periodo_inicio), periodo_inicio), "
             "periodo_fim = COALESCE(VALUES(periodo_fim), periodo_fim), "
@@ -129,12 +136,19 @@ def iniciar_execucao(
                 {
                     "id": execution_id,
                     "marca": marca,
+                    "operacao": operacao,
                     "inicio": _data(periodo_inicio),
                     "fim": _data(periodo_fim),
                     "componente": componente,
                     "versao": os.environ.get("PDOH_CX_VERSION", "fase-observabilidade-1"),
                 },
             )
+            conexao.execute(text('INSERT IGNORE INTO pdoh_controle.execucao_contexto '
+                '(execution_id,marca,operacao,finalidade,justificativa) '
+                'VALUES (:id,:marca,:operacao,:finalidade,:motivo)'), dict(
+                    id=execution_id, marca=marca, operacao=operacao,
+                    finalidade=finalidade or ('VALIDACAO' if componente == 'VALIDACAO' else 'OPERACIONAL'),
+                    motivo='Escopo declarado pelo executor'))
         _emitir("INFO", "EXECUCAO_INICIADA", "Execucao PDOH_CX registrada.")
     except Exception as exc:
         _falha_observabilidade("iniciar_execucao", exc)
@@ -341,34 +355,7 @@ def registrar_fallback(
                 ),
                 {"id": obter_execution_id()},
             )
-            if severidade.upper() in {"ALTA", "CRITICA"}:
-                payload = {
-                    "execution_id": obter_execution_id(),
-                    "marca": MARCA_PADRAO,
-                    "fallback_id": fallback_id,
-                    "problema": codigo,
-                    "data": None,
-                    "impacto": impacto_esperado or motivo,
-                }
-                conexao.execute(
-                    text(
-                        "INSERT IGNORE INTO pdoh_controle.notificacao_outbox "
-                        "(notificacao_id, execution_id, oportunidade_id, fallback_id, "
-                        " tipo_notificacao, prioridade, status_notificacao, dedupe_key, payload) "
-                        "VALUES (:notificacao_id, :id, NULL, :fallback_id, 'FALLBACK', "
-                        " :prioridade, 'PENDENTE', :dedupe_key, CAST(:payload AS JSON))"
-                    ),
-                    {
-                        "notificacao_id": str(uuid.uuid4()),
-                        "id": obter_execution_id(),
-                        "fallback_id": fallback_id,
-                        "prioridade": 1 if severidade.upper() == "CRITICA" else 3,
-                        "dedupe_key": hashlib.sha256(
-                            f"{obter_execution_id()}:{fallback_id}:FALLBACK".encode("utf-8")
-                        ).hexdigest(),
-                        "payload": _json(payload),
-                    },
-                )
+            # Fallback bruto e telemetria: nao gera notificacao operacional.
         _emitir("AVISO", codigo, motivo, etapa=etapa)
     except Exception as exc:
         _falha_observabilidade("registrar_fallback", exc)
@@ -387,103 +374,48 @@ def _fingerprint_oportunidade(item: dict[str, Any]) -> str:
     return hashlib.sha256(_json(base).encode("utf-8")).hexdigest()
 
 
-def registrar_oportunidades(engine, oportunidades: Iterable[dict[str, Any]]) -> int:
-    """Persiste oportunidades, historico inicial e outbox sem propagar falhas."""
+def evidencia_padrao(
+    *,
+    campo_esperado: str | None = None,
+    valor_esperado: Any = None,
+    valor_encontrado: Any = None,
+    fallback_usado: bool = False,
+    fallback_valor: Any = None,
+    origem: str | None = None,
+    registro_afetado: Any = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Monta o JSON de evidencia no padrao operacional (chaves opcionais quando aplicaveis)."""
 
-    inseridas = 0
-    try:
-        with engine.begin() as conexao:
-            for item in oportunidades:
-                oportunidade_id = item.get("oportunidade_id") or str(uuid.uuid4())
-                fingerprint = item.get("fingerprint") or _fingerprint_oportunidade(item)
-                severidade = str(item.get("severidade", "MEDIA")).upper()
-                parametros = {
-                    "oportunidade_id": oportunidade_id,
-                    "id": obter_execution_id(),
-                    "marca": item.get("marca", MARCA_PADRAO),
-                    "data": _data(item.get("data_referencia")),
-                    "origem": _texto(item.get("origem", "INVOLVES"), 80),
-                    "tabela": _texto(item.get("tabela_origem", "DESCONHECIDA"), 160),
-                    "colaborador": _texto(item.get("colaborador"), 255),
-                    "colaborador_id": _texto(item.get("colaborador_id_interno"), 36),
-                    "tipo": _texto(item.get("tipo_problema", "DADO_FORA_DO_PADRAO"), 100),
-                    "descricao": _texto(item.get("descricao_detalhada", "Oportunidade identificada."), 65000),
-                    "severidade": _texto(severidade, 20),
-                    "fingerprint": fingerprint,
-                    "evidencia": _json(item.get("evidencia")),
-                }
-                resultado = conexao.execute(
-                    text(
-                        "INSERT IGNORE INTO pdoh_controle.oportunidade "
-                        "(oportunidade_id, execution_id, marca, data_referencia, origem, "
-                        " tabela_origem, colaborador, colaborador_id_interno, tipo_problema, "
-                        " descricao_detalhada, severidade, status_oportunidade, fingerprint, evidencia) "
-                        "VALUES (:oportunidade_id, :id, :marca, :data, :origem, :tabela, "
-                        " :colaborador, :colaborador_id, :tipo, :descricao, :severidade, "
-                        " 'ABERTA', :fingerprint, CAST(:evidencia AS JSON))"
-                    ),
-                    parametros,
-                )
-                if resultado.rowcount != 1:
-                    continue
-                inseridas += 1
-                conexao.execute(
-                    text(
-                        "INSERT INTO pdoh_controle.oportunidade_historico "
-                        "(oportunidade_id, execution_id, status_anterior, status_novo, acao, observacao) "
-                        "VALUES (:oportunidade_id, :id, NULL, 'ABERTA', 'IDENTIFICADA', "
-                        " 'Oportunidade criada automaticamente em modo observacional.')"
-                    ),
-                    parametros,
-                )
-                if severidade in {"ALTA", "CRITICA"}:
-                    dedupe_key = hashlib.sha256(
-                        f"{obter_execution_id()}:{fingerprint}:QUALIDADE_DADOS".encode("utf-8")
-                    ).hexdigest()
-                    payload = {
-                        "execution_id": obter_execution_id(),
-                        "marca": parametros["marca"],
-                        "oportunidade_id": oportunidade_id,
-                        "tipo_problema": parametros["tipo"],
-                        "severidade": severidade,
-                        "data_referencia": parametros["data"],
-                        "descricao": parametros["descricao"],
-                        "impacto": item.get("impacto") or parametros["descricao"],
-                    }
-                    conexao.execute(
-                        text(
-                            "INSERT IGNORE INTO pdoh_controle.notificacao_outbox "
-                            "(notificacao_id, execution_id, oportunidade_id, tipo_notificacao, "
-                            " prioridade, status_notificacao, dedupe_key, payload) "
-                            "VALUES (:notificacao_id, :id, :oportunidade_id, 'QUALIDADE_DADOS', "
-                            " :prioridade, 'PENDENTE', :dedupe_key, CAST(:payload AS JSON))"
-                        ),
-                        {
-                            "notificacao_id": str(uuid.uuid4()),
-                            "id": obter_execution_id(),
-                            "oportunidade_id": oportunidade_id,
-                            "prioridade": 1 if severidade == "CRITICA" else 3,
-                            "dedupe_key": dedupe_key,
-                            "payload": _json(payload),
-                        },
-                    )
-            if inseridas:
-                conexao.execute(
-                    text(
-                        "UPDATE pdoh_controle.execucao SET total_alertas = total_alertas + :total "
-                        "WHERE execution_id = :id"
-                    ),
-                    {"id": obter_execution_id(), "total": inseridas},
-                )
-        if inseridas:
-            _emitir(
-                "AVISO",
-                "OPORTUNIDADES_IDENTIFICADAS",
-                f"{inseridas} oportunidade(s) registrada(s) sem bloquear a esteira.",
-            )
-    except Exception as exc:
-        _falha_observabilidade("registrar_oportunidades", exc)
-    return inseridas
+    base: dict[str, Any] = {"fallback_usado": bool(fallback_usado)}
+    if campo_esperado is not None:
+        base["campo_esperado"] = campo_esperado
+    if valor_esperado is not None:
+        base["valor_esperado"] = valor_esperado
+    if valor_encontrado is not None:
+        base["valor_encontrado"] = valor_encontrado
+    if fallback_valor is not None:
+        base["fallback_valor"] = fallback_valor
+    if origem is not None:
+        base["origem"] = origem
+    if registro_afetado is not None:
+        base["registro_afetado"] = registro_afetado
+    base.update({k: v for k, v in extra.items() if v is not None})
+    return base
+
+
+_TIPOS_META_OPORTUNIDADE = {"FALHA_PARAMETRIZACAO", "VOLUME_OPORTUNIDADES_TRUNCADO"}
+
+
+def registrar_achado(engine, achados) -> int:
+    """Entrada central (import tardio evita ciclo). Destino vem somente do catalogo."""
+    from .findings import registrar_achado as dispatch
+    return dispatch(engine, achados)
+
+
+def registrar_oportunidades(engine, oportunidades: Iterable[dict[str, Any]]) -> int:
+    """Compatibilidade com chamadores legados: nunca grava diretamente."""
+    return registrar_achado(engine, oportunidades)
 
 
 def atualizar_status_oportunidade(
@@ -492,6 +424,7 @@ def atualizar_status_oportunidade(
     status_novo: str,
     *,
     observacao: str | None = None,
+    responsavel: str | None = None,
     contexto: Any = None,
 ) -> bool:
     """Atualiza o estado e acrescenta auditoria; nao remove historico anterior."""
@@ -518,9 +451,9 @@ def atualizar_status_oportunidade(
                 text(
                     "INSERT INTO pdoh_controle.oportunidade_historico "
                     "(oportunidade_id, execution_id, status_anterior, status_novo, acao, "
-                    " observacao, contexto) VALUES "
+                    " observacao, responsavel, contexto) VALUES "
                     "(:oportunidade_id, :id, :status_anterior, :status_novo, "
-                    " 'STATUS_ATUALIZADO', :observacao, CAST(:contexto AS JSON))"
+                    " 'STATUS_ATUALIZADO', :observacao, :responsavel, CAST(:contexto AS JSON))"
                 ),
                 {
                     "oportunidade_id": oportunidade_id,
@@ -528,6 +461,7 @@ def atualizar_status_oportunidade(
                     "status_anterior": atual,
                     "status_novo": status_novo[:30],
                     "observacao": _texto(observacao, 65000),
+                    "responsavel": _texto(responsavel, 120),
                     "contexto": _json(contexto),
                 },
             )
@@ -535,6 +469,38 @@ def atualizar_status_oportunidade(
     except Exception as exc:
         _falha_observabilidade("atualizar_status_oportunidade", exc)
         return False
+
+
+# --------------------------------------------------------------------------
+# Camada de parametrizacao de tratativas (ex-tabela regra_tratativa).
+# O catalogo agora vive em codigo (shared.treatment_catalog). A tabela e' seguida
+# semeada (bootstrap_regras) so' para manter as FKs existentes em oportunidade/
+# alerta/achado_roteamento vivas ate a remocao completa da tabela.
+# --------------------------------------------------------------------------
+
+
+def resolver_classificacao(
+    engine, tipo_problema: str, marca: str = MARCA_PADRAO, tabela_origem: str | None = None
+) -> str | None:
+    """Retorna a classificacao operacional (OPORTUNIDADE/ALERTA/TELEMETRIA) da regra vigente."""
+
+    return classificacao_efetiva(resolver_tratativa(engine, tipo_problema, marca), tabela_origem)
+
+
+def resolver_tratativa(engine, tipo_problema: str, marca: str = MARCA_PADRAO) -> dict[str, Any] | None:
+    """Resolve a regra vigente para um tipo de problema.
+
+    Le do catalogo em codigo (shared.treatment_catalog), nao mais do banco. `engine'
+    e mantido na assinatura por compatibilidade dos chamadores existentes.
+    """
+
+    return _resolver_regra_catalogo(tipo_problema, marca)
+
+
+def carregar_regras_tratativa(engine, marca: str = MARCA_PADRAO) -> list[dict[str, Any]]:
+    """Le todas as regras aplicaveis do catalogo em codigo (nao mais do banco)."""
+
+    return _listar_regras_catalogo(marca)
 
 
 def registrar_linhagem_saida(engine, dataframe, tabela_destino: str) -> int:

@@ -1,0 +1,37 @@
+name: pdoh_cx_consulta
+services:
+  consulta:
+    image: pdoh_cx_consulta:local
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+      target: runtime
+    env_file:
+      - api/.env.api
+    environment:
+      PDOH_API_DB_HOST: mysql
+      PDOH_API_DB_PORT: "3306"
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - pdoh_cx_network
+      - consulta_ingress
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/health',headers={'Authorization':'Bearer '+os.environ['PDOH_API_TOKEN']}); urllib.request.urlopen(r,timeout=5).close()"]
+      interval: 15s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+networks:
+  pdoh_cx_network:
+    external: true
+    name: pdoh_cx_network
+  consulta_ingress:

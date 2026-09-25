@@ -13,6 +13,7 @@ RUN groupadd --gid 10001 pdoh_cx \
     && useradd --uid 10001 --gid pdoh_cx --create-home --home-dir /home/pdoh_cx pdoh_cx
 
 COPY --chown=pdoh_cx:pdoh_cx bracell/ /app/
+COPY --chown=pdoh_cx:pdoh_cx shared/ /app/shared/
 
 RUN mkdir -p /app/logs /app/outputs \
     && chown -R pdoh_cx:pdoh_cx /app /home/pdoh_cx

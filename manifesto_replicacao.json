@@ -2,10 +2,10 @@
   "origem_logica": "produto_pdoh_exclusivo_rt/bracell",
   "descricao": "Hashes SHA-256 dos processadores e bases de calculo copiados sem alteracao de regra de negocio. data_loader e requirements nao integram o manifesto porque receberam adaptacoes exclusivas do ambiente Docker local.",
   "arquivos": {
-    "bracell/pdoh_bracell.py": "b3015734c19ac708b021aae3f353aa0992868936d6f210dcdc6896d11693ec05",
-    "bracell/pdoh_bracell_sem_atestados_e_declaracoes_medicas.py": "bdc33972b0b5f5fc61a30fa3c989fc33f01dadfa22bd1ad11626965ce4c73699",
-    "bracell/lideres_pdoh_bracell.py": "a3f6b855a810a3fa5daaa6f99a3afe39b36b28635403c17ad70305737ad68ecd",
-    "bracell/lideres_pdoh_bracell_sem_atestados_e_declaracoes_medicas.py": "ee26573218634bb7bd858007ec84bcf1a16046904ab12a6baf04fa0444a11f4d",
+    "bracell/pdoh_bracell.py": "d06b56bc96ee2b6c6f34774e4823c38770efbc43561a0def89693a07b81dc173",
+    "bracell/pdoh_bracell_sem_atestados_e_declaracoes_medicas.py": "31df17c3a7192ccc37370797d30980433d016facd4f320fb15997f122df6578b",
+    "bracell/lideres_pdoh_bracell.py": "512d0293eb49c88e0b1436414a1950b347cc9779dc795c09d61b1577b31370ea",
+    "bracell/lideres_pdoh_bracell_sem_atestados_e_declaracoes_medicas.py": "f246140008281e863df6ba4d75d96381afc2935a8faa891900f38faf29b086f4",
     "bracell/bases_fixas/VALORES BASE DO CALCULO.xlsx": "fbbf72f5a1ece160c8d43947d9f98c798774432766a5cfd1c037c3d9c5686dd0",
     "bracell/bases_fixas/Lista_justificativas_abonaveis.xlsx": "89039f3e795ac44e6bec9ec50b5091d98468169fa93105ae750af3eb7626b8f1"
   }
