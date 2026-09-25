@@ -25,6 +25,7 @@ services:
       start_period: 20s
     networks:
       - pdoh_cx_network
+      - pdoh_cx_local_access
 
   migrate:
     image: mysql:8.4
@@ -79,6 +80,11 @@ services:
       PDOH_DB_PORT: "3306"
       PDOH_DB_USER: ${PDOH_DB_USER:?Defina PDOH_DB_USER no arquivo .env}
       PDOH_DB_PASSWORD: ${PDOH_DB_PASSWORD:?Defina PDOH_DB_PASSWORD no arquivo .env}
+      PDOH_SOURCE_DB_HOST: ${PDOH_SOURCE_DB_HOST:-mysql}
+      PDOH_SOURCE_DB_PORT: ${PDOH_SOURCE_DB_PORT:-3306}
+      PDOH_SOURCE_DB_NAME: ${PDOH_SOURCE_DB_NAME:-involves_bracell}
+      PDOH_SOURCE_DB_USER: ${PDOH_SOURCE_DB_USER:-}
+      PDOH_SOURCE_DB_PASSWORD: ${PDOH_SOURCE_DB_PASSWORD:-}
       TZ: America/Sao_Paulo
     security_opt:
       - no-new-privileges:true
@@ -91,6 +97,7 @@ services:
       - ./bracell/logs:/app/logs
     networks:
       - pdoh_cx_network
+      - pdoh_cx_source_egress
 
 volumes:
   pdoh_cx_mysql_data:
@@ -100,3 +107,7 @@ networks:
   pdoh_cx_network:
     name: pdoh_cx_network
     internal: true
+  pdoh_cx_local_access:
+    name: pdoh_cx_local_access
+  pdoh_cx_source_egress:
+    name: pdoh_cx_source_egress

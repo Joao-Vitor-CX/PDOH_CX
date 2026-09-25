@@ -12,8 +12,31 @@ import json
 from typing import Any
 
 import pandas as pd
+from shared.geography import valid_state
 
-from .observability import registrar_evento, registrar_oportunidades
+from .de_para import carregar_de_para
+from .cadastral_alerts import avaliar_uf_ausente, TIPO_UF_AUSENTE
+from .identity import normalizar_identificador
+from .observability import registrar_evento, registrar_achado
+
+
+# Sinais tecnicos que NAO devem aparecer como oportunidade operacional; sao
+# preservados como telemetria (evento) por observar_qualidade.
+
+
+# Dominio conhecido de perfis de colaborador (observacional; nao participa do calculo).
+PERFIS_CONHECIDOS = frozenset(
+    {
+        "PROMOTOR EXCLUSIVO",
+        "SUPERVISOR EXCLUSIVO",
+        "BACKOFFICE EXCLUSIVO",
+        "GESTOR EXCLUSIVO",
+        "LIDER EXCLUSIVO",
+        "PROMOTORES LIDERES",
+        "T&D",
+        "CLIENTE",
+    }
+)
 
 
 CONFIGURACAO_TABELAS = {
@@ -182,6 +205,8 @@ def analisar_dataframe(
             )
             continue
         mascara = _vazio(dataframe[coluna])
+        if nome_tabela == 'checkin' and coluna == 'hora_entrada' and 'tipo_checkin' in dataframe:
+            mascara &= ~dataframe['tipo_checkin'].astype('string').str.strip().str.casefold().eq('sem checkin').fillna(False)
         _adicionar_por_mascara(
             oportunidades,
             dataframe=dataframe,
@@ -196,51 +221,11 @@ def analisar_dataframe(
             maximo=maximo,
         )
 
-    if len(dataframe.columns):
-        colunas_duplicidade = [
-            coluna for coluna in dataframe.columns if coluna not in {"data_dimensao", "data_evolucao"}
-        ]
-        if colunas_duplicidade:
-            mascara_duplicada = dataframe.duplicated(subset=colunas_duplicidade, keep=False)
-            _adicionar_por_mascara(
-                oportunidades,
-                dataframe=dataframe,
-                mascara=mascara_duplicada,
-                nome_tabela=nome_tabela,
-                tabela_origem=tabela_origem,
-                config=config,
-                tipo="REGISTRO_DUPLICADO",
-                descricao="Registro duplicado segundo a mesma chave usada pelo tratamento atual.",
-                severidade="MEDIA",
-                evidencia_factory=lambda linha: {
-                    "campos_comparados": colunas_duplicidade,
-                    "assinatura": hashlib.sha256(
-                        json.dumps(
-                            [_valor_curto(linha[c]) for c in colunas_duplicidade],
-                            ensure_ascii=False,
-                        ).encode("utf-8")
-                    ).hexdigest(),
-                },
-                maximo=maximo,
-            )
-
-    coluna_nome = config.get("colaborador")
-    if coluna_nome in dataframe.columns:
-        nomes = dataframe[coluna_nome].astype("string")
-        mascara_espacos = (~_vazio(dataframe[coluna_nome])) & nomes.ne(nomes.str.strip())
-        _adicionar_por_mascara(
-            oportunidades,
-            dataframe=dataframe,
-            mascara=mascara_espacos,
-            nome_tabela=nome_tabela,
-            tabela_origem=tabela_origem,
-            config=config,
-            tipo="IDENTIFICACAO_COLABORADOR",
-            descricao="Nome do colaborador contem espacos externos; apenas observacao, sem correcao.",
-            severidade="BAIXA",
-            evidencia_factory=lambda linha: {"nome_observado": _valor_curto(linha[coluna_nome])},
-            maximo=maximo,
-        )
+    # REGISTRO_DUPLICADO: geracao descontinuada. A deduplicacao e responsabilidade
+    # da ETL/carregamento (data_loader.drop_duplicates); esse cenario era ruido
+    # tecnico. Historico preservado; a regra permanece no catalogo como TELEMETRIA.
+    #
+    # IDENTIFICACAO_COLABORADOR (espacos no nome): geracao descontinuada (cosmetico).
 
     colunas_data = set(config.get("obrigatorias", ()))
     colunas_data.update(coluna for par in config.get("pares_tempo", ()) for coluna in par)
@@ -322,6 +307,27 @@ def analisar_dataframe(
                 maximo=maximo,
             )
 
+    if nome_tabela == "colaboradores" and "perfil_acesso" in dataframe.columns:
+        perfil_norm = dataframe["perfil_acesso"].astype("string").str.strip().str.upper()
+        mascara_sem_classificacao = _vazio(dataframe["perfil_acesso"]) | (
+            ~perfil_norm.isin(PERFIS_CONHECIDOS)
+        )
+        _adicionar_por_mascara(
+            oportunidades,
+            dataframe=dataframe,
+            mascara=mascara_sem_classificacao,
+            nome_tabela=nome_tabela,
+            tabela_origem=tabela_origem,
+            config=config,
+            tipo="COLABORADOR_SEM_CLASSIFICACAO",
+            descricao="Colaborador sem perfil de acesso ou com perfil fora do dominio conhecido.",
+            severidade="MEDIA",
+            evidencia_factory=lambda linha: {
+                "perfil_acesso": _valor_curto(linha["perfil_acesso"]),
+            },
+            maximo=maximo,
+        )
+
     if nome_tabela == "colaboradores" and "usuario_ativo" in dataframe.columns:
         valores = dataframe["usuario_ativo"].astype("string").str.strip().str.lower()
         mascara_padrao = (~_vazio(dataframe["usuario_ativo"])) & ~valores.isin(
@@ -348,7 +354,7 @@ def analisar_dataframe(
         if coluna_uf not in dataframe.columns:
             continue
         valores = dataframe[coluna_uf].astype("string").str.strip()
-        mascara_uf = (~_vazio(dataframe[coluna_uf])) & ~valores.str.fullmatch(r"[A-Za-z]{2}")
+        mascara_uf = (~_vazio(dataframe[coluna_uf])) & ~valores.map(valid_state)
         _adicionar_por_mascara(
             oportunidades,
             dataframe=dataframe,
@@ -385,6 +391,20 @@ def analisar_dataframe(
             maximo=maximo,
         )
 
+    if nome_tabela == "colaboradores":
+        cadastro = avaliar_uf_ausente(dataframe, tabela_origem=tabela_origem)
+        alertas = cadastro["alertas"]
+        oportunidades.extend(alertas[:maximo])
+        if len(alertas) > maximo:
+            oportunidades.append(_nova_oportunidade(
+                nome_tabela=nome_tabela, tabela_origem=tabela_origem, config=config,
+                linha=None, indice="RESUMO", tipo="VOLUME_OPORTUNIDADES_TRUNCADO",
+                descricao="Limite de grupos de alerta UF atingido; ocorrencias nao sao grupos.",
+                severidade="BAIXA", evidencia={"regra": TIPO_UF_AUSENTE,
+                    "total_grupos": len(alertas), "armazenadas": maximo,
+                    "total_ocorrencias": cadastro["diagnostico"]["ocorrencias"]},
+            ))
+
     return oportunidades
 
 
@@ -407,7 +427,31 @@ def observar_qualidade(
             periodo_inicio=periodo_inicio,
             periodo_fim=periodo_fim,
         )
-        return registrar_oportunidades(engine, oportunidades)
+        # Mantem apenas o gate de equivalencia De/Para. Classificacao/destino
+        # pertencem exclusivamente ao dispatcher central.
+        operacionais = []
+        estado_mapeado = None
+        for oportunidade in oportunidades:
+            tipo = oportunidade.get("tipo_problema")
+            if nome_tabela == 'checkin' and (tipo == 'INCONSISTENCIA_HORARIO' or (
+                    tipo == 'CAMPO_OBRIGATORIO_VAZIO' and
+                    oportunidade.get('evidencia', {}).get('campo') == 'hora_entrada')):
+                # Os detectores operacionais comprovam estes cenários pela origem.
+                continue
+            # De/Para de estado/uf: valor normalizavel (ex.: "Para"->"PA") nao e'
+            # "fora do padrao". Consulta o catalogo De/Para antes de gerar.
+            if tipo == "DADO_FORA_DO_PADRAO":
+                evidencia = oportunidade.get("evidencia") or {}
+                if evidencia.get("campo") in ("estado", "uf"):
+                    if estado_mapeado is None:
+                        estado_mapeado = {
+                            normalizar_identificador(m["valor_origem"])
+                            for m in carregar_de_para(engine, "CADASTRO", "estado")
+                        }
+                    if normalizar_identificador(evidencia.get("valor")) in estado_mapeado:
+                        continue
+            operacionais.append(oportunidade)
+        return registrar_achado(engine, operacionais)
     except Exception as exc:
         registrar_evento(
             engine,

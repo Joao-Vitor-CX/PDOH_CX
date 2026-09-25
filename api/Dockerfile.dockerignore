@@ -1,0 +1,11 @@
+# Contexto exclusivo da API: não enviar .env, venv, dados ou código da esteira.
+**
+!api/
+!api/requirements.txt
+!api/__init__.py
+!api/app/
+!api/app/*.py
+!api/scripts/
+!api/scripts/validate_live.py
+!shared/
+!shared/*.py

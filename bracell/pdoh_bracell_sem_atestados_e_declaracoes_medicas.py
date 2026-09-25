@@ -579,7 +579,14 @@ try:
     ultima_pesquisa.rename({"Hora": "Hora Correta"}, axis=1, inplace=True)
 
     # Concatenando
-    PDOH = pd.concat([checkin, checkout, produtividade])
+    # Ordem deliberada (produtividade antes de checkout): em empates de horário entre uma
+    # pesquisa e um checkout, a pesquisa deve vir primeiro para herdar o tempo decorrido
+    # (regra "última pesquisa -> checkout" só se aplica quando o checkout é, de fato, o
+    # evento seguinte). Ver "ordem_evento" abaixo, usado como desempate explícito no sort.
+    PDOH = pd.concat([checkin, produtividade, checkout])
+
+    ordem_evento = {"Deslocamento": 0, "Produtividade": 1, "Ocio": 2}
+    PDOH["ordem_evento"] = PDOH["ID"].map(ordem_evento)
 
     PDOH = pd.merge(PDOH, ultima_pesquisa, on=["Colaborador", "data"], how="left")
 
@@ -592,7 +599,13 @@ try:
     # PDOH.to_excel("PDOH.xlsx")
 
     # Selecionando Filtros
-    PDOH.sort_values(by=["Colaborador", "data", "Hora"], inplace=True)
+    # kind="mergesort" (estável) + "ordem_evento" como desempate explícito: sem isso,
+    # empates de horário entre eventos de tipos diferentes (ex.: pesquisa e checkout no
+    # mesmo minuto) caiam em ordem não determinística e podiam creditar o intervalo ao
+    # tipo de evento errado.
+    PDOH.sort_values(
+        by=["Colaborador", "data", "Hora", "ordem_evento"], kind="mergesort", inplace=True
+    )
 
     # Reorganizando índices
     PDOH.index = range(PDOH.shape[0])
@@ -607,7 +620,10 @@ try:
     # Criando um laço de repetição por linha
 
     for i in range(linhas):
-        if PDOH["data"][i + 1] != PDOH["data"][i]:
+        if (
+            PDOH["Colaborador"][i + 1] != PDOH["Colaborador"][i]
+            or PDOH["data"][i + 1] != PDOH["data"][i]
+        ):
             timein.append(t0)
         else:
             timein.append(PDOH["Hora"][i + 1] - PDOH["Hora"][i])
